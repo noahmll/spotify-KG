@@ -3,7 +3,7 @@ import sys
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from config import TOP_N_ARTISTS
+from config import TOP_N_ARTISTS, TRACK_SEARCH_PAGES
 from spotify_client import (
     create_spotify_client,
     get_seed_artists,
@@ -37,16 +37,15 @@ def main():
         loader.test_connection()
         loader.setup_constraints()
 
-        print(f"\n[1/4] Artists per Genre-Suche sammeln...")
-        all_artists = get_seed_artists(sp)
-        # popularity is unreliable in Dev-Mode search; use followers as ranking key
-        all_artists.sort(key=lambda a: a["followers"], reverse=True)
-        top_artists = all_artists[:TOP_N_ARTISTS]
-        print(f"      {len(all_artists)} Artists gefunden, Top {len(top_artists)} ausgewählt")
-        if top_artists:
-            print("      Ausgewählte Artists:")
-            for a in top_artists:
-                print(f"        {a['name']} ({a['followers']:,} Follower)")
+        print(f"\n[1/4] Artists sammeln (Ziel: {TOP_N_ARTISTS}, balanciert über Genres)...")
+        # Dev-Mode-Suche liefert keine popularity/followers/genres → kein Ranking
+        # möglich. Auswahl = Spotifys Such-Relevanz-Reihenfolge, round-robin über Genres.
+        top_artists = get_seed_artists(sp, TOP_N_ARTISTS)
+        print(f"      {len(top_artists)} Artists gesammelt:")
+        for a in top_artists[:15]:
+            print(f"        {a['name']}")
+        if len(top_artists) > 15:
+            print(f"        ... (+{len(top_artists) - 15} weitere)")
 
         top_artist_ids = {a["id"] for a in top_artists}
 
@@ -54,7 +53,7 @@ def main():
         tracks_by_artist = {}
         for artist in tqdm(top_artists, desc="Tracks fetching"):
             tracks_by_artist[artist["id"]] = search_artist_tracks(
-                sp, artist["name"], artist["id"]
+                sp, artist["name"], artist["id"], pages=TRACK_SEARCH_PAGES
             )
 
         print(f"\n[3/4] Daten in Neo4j laden...")

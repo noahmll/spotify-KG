@@ -38,12 +38,25 @@ def _retry(func, *args, max_retries: int = 5, **kwargs):
 SEED_GENRES = ["pop", "hip-hop", "rock", "latin", "r-n-b", "electronic", "country", "k-pop"]
 
 
-def get_seed_artists(sp: spotipy.Spotify) -> list:
-    """Collect artist objects via genre search.
-    Sorts by followers (popularity is unreliable in Dev-Mode search results)."""
+def get_seed_artists(sp: spotipy.Spotify, target: int) -> list:
+    """Collect up to `target` unique artists via genre search.
+
+    Dev-mode search returns no popularity/followers/genres, so there is no
+    ranking metric. Artists are gathered round-robin across SEED_GENRES (one
+    page of 10 per genre per round) in Spotify's search-relevance order, which
+    keeps the set balanced across genres. Collection stops as soon as `target`
+    unique artists are reached, so request cost scales with `target` rather
+    than fetching a large pool to discard most of it.
+    """
     artists_by_id = {}
-    for genre in tqdm(SEED_GENRES, desc="Searching genres"):
-        for offset in range(0, 200, 10):
+    # search offset caps at 1000 → at most 100 pages per genre
+    for offset in tqdm(range(0, 1000, 10), desc="Collecting artists"):
+        if len(artists_by_id) >= target:
+            break
+        progressed = False
+        for genre in SEED_GENRES:
+            if len(artists_by_id) >= target:
+                break
             try:
                 result = _retry(
                     sp.search,
@@ -53,22 +66,27 @@ def get_seed_artists(sp: spotipy.Spotify) -> list:
                     offset=offset,
                 )
                 items = result.get("artists", {}).get("items", [])
-                if not items:
-                    break
-                for artist in items:
-                    aid = artist.get("id")
-                    if aid and aid not in artists_by_id:
-                        artists_by_id[aid] = _map_artist(artist)
             except Exception:
-                break
-    return list(artists_by_id.values())
+                continue
+            if items:
+                progressed = True
+            for artist in items:
+                aid = artist.get("id")
+                if aid and aid not in artists_by_id:
+                    artists_by_id[aid] = _map_artist(artist)
+        if not progressed:
+            break  # every genre exhausted
+    return list(artists_by_id.values())[:target]
 
 
-def search_artist_tracks(sp: spotipy.Spotify, artist_name: str, artist_id: str) -> list:
-    """Get tracks for an artist via search (artist_top_tracks is 403 in Dev-Mode)."""
+def search_artist_tracks(
+    sp: spotipy.Spotify, artist_name: str, artist_id: str, pages: int = 5
+) -> list:
+    """Get tracks for an artist via search (artist_top_tracks is 403 in Dev-Mode).
+    `pages` search pages of 10 tracks each are scanned."""
     tracks = []
     seen_ids = set()
-    for offset in range(0, 50, 10):
+    for offset in range(0, pages * 10, 10):
         try:
             result = _retry(
                 sp.search,
