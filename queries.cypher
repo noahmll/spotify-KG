@@ -1,36 +1,29 @@
 // ============================================================
-// Spotify Knowledge Graph — Demo-Queries für die Präsentation
+// Spotify Knowledge Graph — Analyse-Queries
 // Ausführen im Neo4j Browser: http://localhost:7474
 //
 // Alle Queries laufen mit purem Cypher (kein GDS/APOC nötig) und
-// wurden gegen einen realen Datenbestand validiert.
+// sind RUN-UNABHÄNGIG: sie wählen Artists dynamisch (z. B. den am
+// stärksten vernetzten Hub) statt fester Namen und funktionieren
+// daher mit jedem Datenbestand.
 //
-// DATENMODELL-HINWEIS: Artist-Knoten tragen ein seed-Flag:
-//   seed=true  → per Genre-Suche gesammelter Kern (z. B. 150)
-//   seed=false → Feature-Artists, die über Tracks entdeckt wurden
-// Mit Feature-Artists wächst der Graph deutlich (mehrere hundert
-// zusätzliche Artist-Knoten, >5.000 Elemente gesamt möglich).
+// DATENMODELL: Artist-Knoten tragen ein seed-Flag:
+//   seed=true  → per Genre-Suche gesammelter Kern
+//   seed=false → Feature-Artists, über gemeinsame Tracks entdeckt
+// Kanten: (Artist)-[:PERFORMED_ON]->(Track) und daraus abgeleitet
+//   (Artist)-[:COLLABORATED_WITH]-(Artist) mit Property track_ids.
 //
-// WICHTIG: Konkrete Zahlen/Namen ändern sich mit jedem Pipeline-
-// Lauf leicht (Spotify-Suchreihenfolge ist nicht deterministisch).
-// Die hartkodierten Artist-Namen unten (Farruko, Pitbull, ...)
-// vor der Demo einmal mit Query 2 gegenprüfen.
-//
-// HINWEIS VISUALISIERUNG: Der Neo4j Browser rendert standardmäßig
-// max. ~1.000 Knoten (Einstellung "Visualization node limit" im
-// Settings-Drawer). Das ist ein reines Anzeige-Limit — die Queries
-// hier liefern bewusst kleine, lesbare Teilgraphen statt alles auf
-// einmal zu rendern.
+// VISUALISIERUNG: Der Neo4j Browser rendert per Default max. ~1.000
+// Knoten ("Visualization node limit" im Settings-Drawer). Graph-
+// Queries hier liefern bewusst lesbare Teilgraphen.
 // ============================================================
 
 
 // ------------------------------------------------------------
 // 1) ÜBERBLICK: Was ist im Graphen?
-// Zeigt: Anzahl Knoten pro Label und Kanten pro Typ.
-// Warum interessant: Erster Beleg, dass der Lauf vollständig war;
-// Einstieg in die Erklärung des Datenmodells.
-// Erwartung: Track ~2.000; Artist = Seed (~150) + Feature (mehrere
-// hundert); PERFORMED_ON und COLLABORATED_WITH entsprechend größer.
+// Zeigt: Knoten pro Label und Kanten pro Typ.
+// Warum: Erster Beleg für einen vollständigen Lauf; Einstieg ins
+// Datenmodell.
 // ------------------------------------------------------------
 MATCH (n)
 RETURN labels(n)[0] AS typ, count(*) AS anzahl
@@ -47,12 +40,9 @@ RETURN CASE WHEN a.seed THEN 'Seed-Artist (gesucht)'
 
 // ------------------------------------------------------------
 // 2) TOP-KOLLABORATEURE (Degree Centrality)
-// Zeigt: Die 10 am stärksten vernetzten Artists nach Anzahl
-// direkter Kollaborationsbeziehungen.
-// Warum interessant: Kernergebnis des Projekts — im gesammelten
-// Ausschnitt dominiert ein Latin-Cluster (Farruko, Ozuna, J Balvin,
-// KAROL G, Bad Bunny); Latin-Pop ist ein extrem featurelastiges Genre.
-// Erwartung: Tabelle, Spitzenwerte um ~14 Kollaborationen.
+// Zeigt: Die am stärksten vernetzten Artists nach Anzahl direkter
+// Kollaborationsbeziehungen.
+// Warum: Kernergebnis — wer ist im Netzwerk am aktivsten verlinkt?
 // ------------------------------------------------------------
 MATCH (a:Artist)-[:COLLABORATED_WITH]-()
 RETURN a.name AS artist, count(*) AS kollaborationen
@@ -63,12 +53,10 @@ LIMIT 10;
 // ------------------------------------------------------------
 // 3) EGO-GRAPH DES TOP-HUBS (Visualisierung!)
 // Zeigt: Den am stärksten vernetzten Artist mit seiner direkten
-// Nachbarschaft UND den Verbindungen der Nachbarn untereinander —
-// als Graph-Ansicht ausführen.
-// Warum interessant: Die schönste Visualisierung für die Demo:
-// klein genug zum Lesen, zeigt echte Cluster-Struktur statt
-// "Haarball". Findet den Hub dynamisch (kein hartkodierter Name).
-// Erwartung: ~15-30 Knoten um den Hub (zuletzt: Farruko).
+// Nachbarschaft UND den Verbindungen der Nachbarn untereinander.
+// -> Als Graph-Ansicht ausführen.
+// Warum: Lesbare Visualisierung mit echter Cluster-Struktur; der
+// Hub wird dynamisch bestimmt (kein fester Name).
 // ------------------------------------------------------------
 MATCH (hub:Artist)-[:COLLABORATED_WITH]-()
 WITH hub, count(*) AS deg ORDER BY deg DESC LIMIT 1
@@ -80,12 +68,10 @@ RETURN p, q;
 
 // ------------------------------------------------------------
 // 4) STÄRKSTE KOLLABORATIONS-PAARE (Kantengewicht)
-// Zeigt: Artist-Paare mit den meisten gemeinsamen Tracks —
-// das Gewicht steckt als track_ids-Liste auf der Kante.
-// Warum interessant: Demonstriert Properties AUF Beziehungen
-// (Alleinstellungsmerkmal des Property-Graph-Modells).
-// Erwartung: z. B. Peso Pluma & Tito Double P (~12 gemeinsame
-// Tracks), David Guetta & Sia (~4).
+// Zeigt: Artist-Paare mit den meisten gemeinsamen Tracks — das
+// Gewicht steckt als track_ids-Liste auf der Kante.
+// Warum: Demonstriert Properties AUF Beziehungen (Merkmal des
+// Property-Graph-Modells).
 // ------------------------------------------------------------
 MATCH (a:Artist)-[c:COLLABORATED_WITH]-(b:Artist)
 WHERE a.name < b.name
@@ -96,31 +82,80 @@ LIMIT 10;
 
 
 // ------------------------------------------------------------
-// 5) KÜRZESTER PFAD: "Six Degrees of Spotify"
-// Zeigt: Wie zwei Artists aus verschiedenen Welten über
-// Kollaborationsketten verbunden sind — als Graph ausführen.
-// Warum interessant: DIE Signature-Query einer Graphdatenbank;
-// in SQL nur mit rekursiven CTEs machbar, in Cypher eine Zeile.
-// Erwartung (letzter Lauf): Pitbull → Farruko → Tiësto → Peso Pluma
-// (3 Hops). Namen ggf. anpassen, falls ein Artist im aktuellen
-// Lauf fehlt (mit Query 2 prüfen).
+// 5) WIE VIELE GETRENNTE NETZWERKE GIBT ES? (Connected Components)
+// Zeigt: Anzahl voneinander unabhängiger Kollaborations-Netzwerke.
+// Methode (rein Cypher, ohne GDS): Jeder vernetzte Artist erhält
+// als "Netzwerk-ID" die kleinste elementId, die über beliebig
+// lange COLLABORATED_WITH-Pfade erreichbar ist (per shortestPath =
+// BFS, terminiert sauber). Gleiche ID = gleiches Netzwerk.
+// Warum: Struktureller Gesamtblick — meist eine große Community
+// plus mehrere kleine Inseln.
+// Hinweis: Läuft auf ~1.000 Knoten in wenigen Sekunden.
 // ------------------------------------------------------------
-MATCH p = shortestPath(
-  (a:Artist {name: "Pitbull"})-[:COLLABORATED_WITH*..10]-(b:Artist {name: "Peso Pluma"})
-)
+MATCH (a:Artist) WHERE (a)-[:COLLABORATED_WITH]-()
+MATCH p = shortestPath((a)-[:COLLABORATED_WITH*]-(b:Artist))
+WHERE a <> b
+WITH a, min(elementId(b)) AS mb
+WITH DISTINCT CASE WHEN mb < elementId(a) THEN mb ELSE elementId(a) END AS netzwerk_id
+RETURN count(netzwerk_id) AS anzahl_netzwerke;
+
+// Größenverteilung der Netzwerke (größte zuerst)
+MATCH (a:Artist) WHERE (a)-[:COLLABORATED_WITH]-()
+MATCH p = shortestPath((a)-[:COLLABORATED_WITH*]-(b:Artist))
+WHERE a <> b
+WITH a, min(elementId(b)) AS mb
+WITH CASE WHEN mb < elementId(a) THEN mb ELSE elementId(a) END AS netzwerk_id
+WITH netzwerk_id, count(*) AS groesse
+RETURN groesse AS artists_im_netzwerk, count(*) AS anzahl_netzwerke_dieser_groesse
+ORDER BY artists_im_netzwerk DESC;
+
+
+// ------------------------------------------------------------
+// 6) LONGEST PATH: Die längste Kollaborationskette
+// Zeigt: Zwei weit auseinander liegende Artists und die kürzeste
+// Kette zwischen ihnen — nahe am Durchmesser des Netzwerks.
+// -> Als Graph-Ansicht ausführen.
+// Methode: 2-Sweep-Heuristik (Standardverfahren für Graph-
+// Durchmesser, rein Cypher): (1) vom Top-Hub den entferntesten
+// Artist u suchen, (2) von u aus den entferntesten Artist v. Der
+// Pfad u–v ist eine der längsten Ketten im Graphen.
+// Warum: Gegenstück zur Zentralität — wie "gestreckt" ist das
+// Netz? Schöne, ungewöhnliche Visualisierung.
+// ------------------------------------------------------------
+MATCH (h:Artist)-[:COLLABORATED_WITH]-()
+WITH h, count(*) AS deg ORDER BY deg DESC LIMIT 1
+MATCH p1 = shortestPath((h)-[:COLLABORATED_WITH*..40]-(u:Artist))
+WHERE u <> h
+WITH u, length(p1) AS d1 ORDER BY d1 DESC LIMIT 1
+MATCH p2 = shortestPath((u)-[:COLLABORATED_WITH*..40]-(v:Artist))
+WHERE v <> u
+WITH p2, length(p2) AS hops ORDER BY hops DESC LIMIT 1
+RETURN p2 AS longest_path, hops;
+
+
+// ------------------------------------------------------------
+// 7) KÜRZESTER PFAD zwischen den zwei größten Hubs
+// Zeigt: Wie eng die beiden am stärksten vernetzten Artists
+// verbunden sind — als Graph-Ansicht ausführen.
+// Warum: DIE Signature-Query einer Graphdatenbank; in SQL nur mit
+// rekursiven CTEs, in Cypher eine Zeile. Endpunkte dynamisch
+// gewählt (kein fester Name).
+// ------------------------------------------------------------
+MATCH (a:Artist)-[:COLLABORATED_WITH]-()
+WITH a, count(*) AS deg ORDER BY deg DESC LIMIT 2
+WITH collect(a) AS hubs
+WITH hubs[0] AS hub1, hubs[1] AS hub2
+MATCH p = shortestPath((hub1)-[:COLLABORATED_WITH*..15]-(hub2))
 RETURN p;
 
 
 // ------------------------------------------------------------
-// 6) BRÜCKEN-ARTISTS (Broker im Netzwerk)
-// Zeigt: Artists, die die meisten Paare von Künstlern verbinden,
-// die selbst NICHT direkt kollaborieren (Betweenness-Idee,
-// ohne GDS-Plugin in purem Cypher).
-// Warum interessant: Wer hält das Netzwerk zusammen? Diese
-// Artists sind die "Vermittler" zwischen Subszenen (z. B. verbindet
-// David Guetta den Pop/EDM-Bereich mit dem Latin-Cluster).
-// Erwartung: Farruko (~69 Paare), Ozuna, J Balvin, KAROL G,
-// David Guetta.
+// 8) BRÜCKEN-ARTISTS (Broker im Netzwerk)
+// Zeigt: Artists, die viele Paare von Künstlern verbinden, die
+// selbst NICHT direkt kollaborieren (Betweenness-Idee, rein
+// Cypher ohne GDS).
+// Warum: Wer hält das Netzwerk zusammen und vermittelt zwischen
+// Subszenen (z. B. EDM ↔ Latin)?
 // ------------------------------------------------------------
 MATCH (x:Artist)-[:COLLABORATED_WITH]-(mitte:Artist)-[:COLLABORATED_WITH]-(y:Artist)
 WHERE x <> y AND NOT (x)-[:COLLABORATED_WITH]-(y)
@@ -131,16 +166,14 @@ LIMIT 10;
 
 
 // ------------------------------------------------------------
-// 7) FEATURE-DICHTESTE TRACKS
-// Zeigt: Tracks, auf denen die meisten der gesammelten Artists
-// gemeinsam stehen (Mega-Features/Remixes).
-// Warum interessant: Verbindet beide Knotentypen; erklärt, WORAUS
-// die COLLABORATED_WITH-Kanten abgeleitet werden. Hinweis für die
-// Demo: Derselbe Songtitel kann doppelt erscheinen (verschiedene
-// Spotify-Releases = verschiedene Track-IDs) — guter Anlass, über
-// Datenqualität zu sprechen.
-// Erwartung: z. B. "China" und "Baila Baila Baila - Remix" mit je
-// 5 beteiligten Artists.
+// 9) FEATURE-DICHTESTE TRACKS
+// Zeigt: Tracks, auf denen die meisten Artists gemeinsam stehen
+// (Mega-Features / Remixe).
+// Warum: Verbindet beide Knotentypen und erklärt, WORAUS die
+// COLLABORATED_WITH-Kanten abgeleitet werden.
+// Hinweis: Derselbe Songtitel kann doppelt auftauchen (mehrere
+// Spotify-Releases = mehrere Track-IDs) — Anlass, über Daten-
+// qualität zu sprechen.
 // ------------------------------------------------------------
 MATCH (a:Artist)-[:PERFORMED_ON]->(t:Track)
 WITH t, count(a) AS beteiligte, collect(a.name) AS artists
@@ -151,27 +184,21 @@ LIMIT 10;
 
 
 // ------------------------------------------------------------
-// 8) CLUSTER-VISUALISIERUNG: Das gesamte Kollaborationsnetzwerk
+// 10) CLUSTER-VISUALISIERUNG: Das Kollaborationsnetzwerk
 // Zeigt: NUR die Artist-Knoten mit ihren Kollaborationskanten
-// (ohne die ~2.000 Track-Knoten) — als Graph ausführen.
-// Warum interessant: ~85 vernetzte Artists / ~160 Kanten sind
-// problemlos renderbar und zeigen die Community-Struktur auf einen
-// Blick: eine Riesenkomponente (~76 Artists, Latin/Pop/EDM) plus
-// kleine Inseln (z. B. Billie Eilish–Charli xcx). Das ist die
-// richtige Antwort auf das Browser-Anzeige-Limit: nicht alles
-// rendern, sondern die aussagekräftige Projektion.
-// Erwartung: Ein großer zusammenhängender Cluster + 3-4 Mini-Inseln.
+// (ohne die Track-Knoten) — als Graph-Ansicht ausführen.
+// Warum: Die richtige Antwort auf das Browser-Anzeige-Limit —
+// nicht alles rendern, sondern die aussagekräftige Projektion:
+// eine große zusammenhängende Community plus kleine Inseln.
 // ------------------------------------------------------------
 MATCH p = (:Artist)-[:COLLABORATED_WITH]-(:Artist)
 RETURN p;
 
 
 // ------------------------------------------------------------
-// 9) NEUESTE KOLLABORATIONEN (Aktualität der Daten)
+// 11) NEUESTE KOLLABORATIONEN (Aktualität der Daten)
 // Zeigt: Die jüngsten gemeinsamen Releases im Datenbestand.
-// Warum interessant: Beweist, dass die Pipeline live aktuelle
-// Daten zieht (Releases aus dem laufenden Jahr).
-// Erwartung: Tracks mit Release-Datum der letzten Wochen/Monate.
+// Warum: Beleg, dass die Pipeline aktuelle Daten zieht.
 // ------------------------------------------------------------
 MATCH (a1:Artist)-[:PERFORMED_ON]->(t:Track)<-[:PERFORMED_ON]-(a2:Artist)
 WHERE a1.name < a2.name
@@ -182,17 +209,47 @@ LIMIT 10;
 
 
 // ------------------------------------------------------------
-// 10) STICHPROBEN-CHECK: Solo- vs. vernetzte Seed-Artists
+// 12) STICHPROBEN-CHECK: Solo- vs. vernetzte Seed-Artists
 // Zeigt: Wie viele der GESUCHTEN Artists (seed=true) im Sample
 // (k)eine Kollaboration haben. Feature-Artists haben per
-// Konstruktion immer mindestens eine Kollaboration und werden
-// daher hier ausgeklammert.
-// Warum interessant: Ehrliche methodische Einordnung: "solo"
-// heißt nur "keine Kollaboration in unseren gesammelten Tracks",
-// nicht "hat nie kollaboriert".
-// Erwartung: grob hälftige Verteilung bei den Seed-Artists.
+// Konstruktion immer mindestens eine Kollaboration.
+// Warum: Ehrliche methodische Einordnung — "solo" heißt nur
+// "keine Kollaboration in unseren gesammelten Tracks", nicht
+// "hat nie kollaboriert".
 // ------------------------------------------------------------
 MATCH (a:Artist) WHERE a.seed
 RETURN
   CASE WHEN (a)-[:COLLABORATED_WITH]-() THEN 'vernetzt' ELSE 'solo (im Sample)' END AS status,
   count(*) AS anzahl;
+
+
+// ------------------------------------------------------------
+// 13) SIX DEGREES OF SEPARATION (Small-World-Test)
+// Zeigt: Für ALLE erreichbaren Artist-Paare die kürzeste
+// Kollaborationsdistanz — und wie groß der Anteil ist, der in
+// höchstens 6 Schritten verbunden ist.
+// Methode: All-Pairs shortestPath (rein Cypher, ohne GDS). Jedes
+// Paar wird über elementId(a) < elementId(b) genau einmal gezählt.
+// Warum: Prüft die berühmte "Six Degrees"-Hypothese am realen
+// Kollaborationsnetz. Ein hoher Anteil ≤ 6 und ein niedriger
+// Durchschnitt belegen die Small-World-Eigenschaft.
+// Hinweis: Läuft auf ~1.000 Knoten in wenigen Sekunden.
+// ------------------------------------------------------------
+MATCH (a:Artist) WHERE (a)-[:COLLABORATED_WITH]-()
+MATCH p = shortestPath((a)-[:COLLABORATED_WITH*..15]-(b:Artist))
+WHERE elementId(a) < elementId(b)
+WITH length(p) AS hops
+RETURN
+  count(*) AS paare_gesamt,
+  sum(CASE WHEN hops <= 6 THEN 1 ELSE 0 END) AS innerhalb_6_hops,
+  round(100.0 * sum(CASE WHEN hops <= 6 THEN 1 ELSE 0 END) / count(*), 1) AS prozent_innerhalb_6,
+  round(avg(hops), 2) AS durchschnitt_hops,
+  max(hops) AS max_hops;
+
+// Verteilung der kürzesten Pfadlängen (das "Small-World"-Histogramm)
+    MATCH (a:Artist) WHERE (a)-[:COLLABORATED_WITH]-()
+    MATCH p = shortestPath((a)-[:COLLABORATED_WITH*..15]-(b:Artist))
+    WHERE elementId(a) < elementId(b)
+    WITH length(p) AS hops
+    RETURN hops, count(*) AS anzahl_paare
+    ORDER BY hops;
