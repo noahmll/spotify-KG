@@ -47,8 +47,6 @@ def main():
         if len(top_artists) > 15:
             print(f"        ... (+{len(top_artists) - 15} weitere)")
 
-        top_artist_ids = {a["id"] for a in top_artists}
-
         print(f"\n[2/4] Tracks für {len(top_artists)} Artists per Suche abrufen...")
         tracks_by_artist = {}
         for artist in tqdm(top_artists, desc="Tracks fetching"):
@@ -59,14 +57,15 @@ def main():
         print(f"\n[3/4] Daten in Neo4j laden...")
         loader.clear_database()
         loader.load_artists(top_artists)
-        loader.load_tracks_and_relationships(tracks_by_artist, top_artist_ids)
+        loader.load_tracks_and_relationships(tracks_by_artist)
 
         print(f"\n[4/4] Kollaborationen ableiten...")
         loader.derive_collaborations()
 
         stats = loader.get_stats()
         print(f"\n=== Fertig! ===")
-        print(f"  Artist-Knoten:      {stats['artists']}")
+        print(f"  Artist-Knoten:      {stats['artists']}"
+              f" (davon {stats['seed_artists']} Seed, {stats['feature_artists']} Feature)")
         print(f"  Track-Knoten:       {stats['tracks']}")
         print(f"  PERFORMED_ON:       {stats['performed_on']}")
         print(f"  COLLABORATED_WITH:  {stats['collaborated_with']}")

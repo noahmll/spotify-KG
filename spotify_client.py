@@ -14,7 +14,13 @@ def create_spotify_client(client_id: str, client_secret: str) -> spotipy.Spotify
     return spotipy.Spotify(auth_manager=auth_manager, retries=0)
 
 
+# Throttle the rate-limit notice so long backoffs don't spam the terminal.
+_last_rl_notice = 0.0
+_RL_NOTICE_INTERVAL = 30  # seconds
+
+
 def _retry(func, *args, max_retries: int = 5, **kwargs):
+    global _last_rl_notice
     for attempt in range(max_retries):
         try:
             return func(*args, **kwargs)
@@ -28,14 +34,19 @@ def _retry(func, *args, max_retries: int = 5, **kwargs):
                         f"oder Anzahl der Requests reduzieren (TOP_N_ARTISTS senken)."
                     )
                 wait = min(retry_after, 2 ** attempt)
-                print(f"\n  Rate limited, waiting {wait}s...")
+                # Quiet backoff: at most one notice per _RL_NOTICE_INTERVAL, and
+                # written via tqdm so it doesn't break active progress bars.
+                now = time.monotonic()
+                if now - _last_rl_notice > _RL_NOTICE_INTERVAL:
+                    tqdm.write("  (Spotify rate limit – warte kurz, läuft weiter...)")
+                    _last_rl_notice = now
                 time.sleep(wait)
             else:
                 raise
     raise RuntimeError("Max retries exceeded on Spotify API call")
 
 
-SEED_GENRES = ["pop", "hip-hop", "rock", "latin", "r-n-b", "electronic", "country", "k-pop"]
+SEED_GENRES = ["pop", "hip-hop", "rock", "latin", "r-n-b", "electronic", "country", "k-pop", "jazz", "metal", "reggae", "soul"]
 
 
 def get_seed_artists(sp: spotipy.Spotify, target: int) -> list:
@@ -102,9 +113,15 @@ def search_artist_tracks(
                 tid = t.get("id")
                 if not tid or tid in seen_ids:
                     continue
-                track_artist_ids = [a["id"] for a in t.get("artists", []) if a.get("id")]
+                # Capture every artist on the track (id + name + uri) so featured
+                # collaborators can become graph nodes too, not just seed artists.
+                track_artists = [
+                    {"id": a["id"], "name": a.get("name", ""), "uri": a.get("uri", "")}
+                    for a in t.get("artists", [])
+                    if a.get("id")
+                ]
                 # Only include tracks where this artist actually appears (avoids name matches)
-                if artist_id not in track_artist_ids:
+                if artist_id not in [a["id"] for a in track_artists]:
                     continue
                 seen_ids.add(tid)
                 tracks.append({
@@ -113,7 +130,7 @@ def search_artist_tracks(
                     "release_date": t.get("album", {}).get("release_date", ""),
                     "popularity": t.get("popularity", 0),
                     "uri": t.get("uri", ""),
-                    "artist_ids": track_artist_ids,
+                    "artists": track_artists,
                 })
         except Exception:
             break

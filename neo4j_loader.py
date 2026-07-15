@@ -31,6 +31,8 @@ class Neo4jLoader:
             session.run("MATCH (n) DETACH DELETE n")
 
     def load_artists(self, artists: list):
+        """Load the collected seed artists. Marked seed=true to distinguish the
+        searched core from featured collaborators discovered via tracks."""
         with self.driver.session() as session:
             for artist in tqdm(artists, desc="Loading artists"):
                 session.run(
@@ -40,12 +42,17 @@ class Neo4jLoader:
                         a.genres     = $genres,
                         a.popularity = $popularity,
                         a.followers  = $followers,
-                        a.uri        = $uri
+                        a.uri        = $uri,
+                        a.seed       = true
                     """,
                     **artist,
                 )
 
-    def load_tracks_and_relationships(self, tracks_by_artist: dict, top_artist_ids: set):
+    def load_tracks_and_relationships(self, tracks_by_artist: dict):
+        """Create Track nodes and PERFORMED_ON edges for EVERY artist on each
+        track. Featured collaborators that were not seed artists are created as
+        nodes on the fly (seed=false), widening and densifying the graph without
+        any extra API calls."""
         with self.driver.session() as session:
             for artist_id, tracks in tqdm(
                 tracks_by_artist.items(), desc="Loading tracks & edges"
@@ -65,16 +72,23 @@ class Neo4jLoader:
                         popularity=track["popularity"],
                         uri=track["uri"],
                     )
-                    for aid in track["artist_ids"]:
-                        if aid not in top_artist_ids:
-                            continue
+                    for a in track["artists"]:
                         session.run(
                             """
-                            MATCH (a:Artist {id: $artist_id})
-                            MATCH (t:Track   {id: $track_id})
-                            MERGE (a)-[:PERFORMED_ON]->(t)
+                            MERGE (ar:Artist {id: $aid})
+                              ON CREATE SET ar.name       = $aname,
+                                            ar.uri        = $auri,
+                                            ar.seed       = false,
+                                            ar.genres     = [],
+                                            ar.popularity = 0,
+                                            ar.followers  = 0
+                            WITH ar
+                            MATCH (t:Track {id: $track_id})
+                            MERGE (ar)-[:PERFORMED_ON]->(t)
                             """,
-                            artist_id=aid,
+                            aid=a["id"],
+                            aname=a["name"],
+                            auri=a["uri"],
                             track_id=track["id"],
                         )
 
@@ -100,6 +114,10 @@ class Neo4jLoader:
 
             return {
                 "artists": count("MATCH (a:Artist) RETURN count(a)"),
+                "seed_artists": count("MATCH (a:Artist) WHERE a.seed RETURN count(a)"),
+                "feature_artists": count(
+                    "MATCH (a:Artist) WHERE a.seed = false RETURN count(a)"
+                ),
                 "tracks": count("MATCH (t:Track) RETURN count(t)"),
                 "performed_on": count("MATCH ()-[r:PERFORMED_ON]->() RETURN count(r)"),
                 "collaborated_with": count(
