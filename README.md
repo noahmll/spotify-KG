@@ -1,137 +1,227 @@
-# spotify-KG — Spotify Knowledge Graph
+# Spotify Knowledge Graph
 
-**DIS18, Gruppe 6** · Johnson Gaspar Baptista, Noah Anton Müller
+Eine Python-Pipeline, die Daten der **Spotify Web API** in einen **Knowledge Graph
+in Neo4j** überführt. Im Zentrum steht die Frage: *Welche Künstler:innen arbeiten
+zusammen?* — abgeleitet daraus, dass sie gemeinsam auf einem Track auftreten. Das
+Ergebnis ist ein durchsuchbares Kollaborationsnetzwerk mit Analysen wie Degree
+Centrality, kürzesten Pfaden ("Six Degrees of Spotify") und Community-Struktur.
 
-Eine Pipeline, die über die Spotify Web API Künstler und Tracks sammelt, daraus
-in **Neo4j** einen Knowledge Graph aufbaut und ein **Kollaborationsnetzwerk**
-zwischen Künstlern ableitet:
-
-```
-Spotify Web API ──> spotify_client.py ──> main.py ──> neo4j_loader.py ──> Neo4j
-   (Suche)           (Fetch + Retry)     (Pipeline)     (Batch-Load)     (Graph)
-```
-
-**Datenmodell:**
-
-```
-(:Artist {id, name, uri, seed, …})-[:PERFORMED_ON]->(:Track {id, name, release_date, uri, …})
-(:Artist)-[:COLLABORATED_WITH {track_ids}]-(:Artist)   ← abgeleitet aus gemeinsamen Tracks
-```
-
-`seed=true` sind die per Genre-Suche gesammelten Kern-Artists; `seed=false`
-sind Feature-Artists, die über gemeinsame Tracks entdeckt und ohne zusätzliche
-API-Requests als Knoten angelegt werden.
-
-> **Hinweis Development-Mode:** Der Spotify-Zugang liefert keine
-> `popularity`/`followers`/`genres`-Werte (immer 0 bzw. leer). Der Kern des
-> Graphen ist das Kollaborationsnetzwerk — Details in [DOKUMENTATION.md](DOKUMENTATION.md).
+> **Projektkontext:** Prüfungsleistung im Modul **DIS18**, **Gruppe 6**
+> (Johnson Gaspar Baptista, Noah Anton Müller).
 
 ---
 
+## Ziel
+
+- Öffentliche Musikdaten in ein **Graphmodell** überführen und so Beziehungen
+  sichtbar machen, die in einer relationalen Tabelle nur umständlich abfragbar wären.
+- Das entstehende Netzwerk mit **reinen Cypher-Queries** analysieren
+  (keine kostenpflichtigen Plugins nötig).
+- Die Pipeline so dokumentieren, dass sie **nachgenutzt und weiterentwickelt**
+  werden kann.
+
+## Datenmodell (Concept Map)
+
+Zwei Knotentypen, zwei Beziehungstypen:
+
+```mermaid
+graph LR
+    A1["Artist<br/>(seed=true)"] -->|PERFORMED_ON| T["Track"]
+    A2["Artist<br/>(seed=false,<br/>Feature)"] -->|PERFORMED_ON| T
+    A1 ---|COLLABORATED_WITH| A2
+```
+
+| Knoten / Kante | Eigenschaften |
+|---|---|
+| **`Artist`** | `id`, `name`, `uri`, `seed` (true = per Suche gesammelt, false = über Track entdeckt), `genres`, `popularity`, `followers` |
+| **`Track`** | `id`, `name`, `release_date`, `popularity`, `uri` |
+| **`PERFORMED_ON`** | `Artist → Track` (Künstler:in wirkt am Track mit) |
+| **`COLLABORATED_WITH`** | `Artist – Artist`, ungerichtet; Property `track_ids` = Liste gemeinsamer Tracks |
+
+`COLLABORATED_WITH` wird **abgeleitet**: Stehen zwei Artists über `PERFORMED_ON`
+am selben Track, entsteht eine Kollaborationskante.
+
+> **Hinweis:** `genres`, `popularity` und `followers` liefert die Spotify-API im
+> Development-Mode nicht mehr (siehe [Einschränkungen](#einschränkungen)). Der Kern
+> des Graphen ist deshalb die **Netzwerkstruktur**, nicht die Metadaten.
+
+## Architektur & Datenfluss
+
+```mermaid
+flowchart TD
+    S[Spotify Web API] -->|Genre-Suche, Round-Robin| C[get_seed_artists]
+    C -->|Seed-Artists| TR[search_artist_tracks]
+    S -->|Track-Suche| TR
+    TR -->|Tracks + alle beteiligten Artists| L[Neo4jLoader]
+    L -->|Artist- & Track-Knoten,<br/>PERFORMED_ON| DB[(Neo4j)]
+    L -->|derive_collaborations| DB
+    DB --> Q[queries.cypher<br/>Analyse & Visualisierung]
+```
+
+Die Pipeline läuft in vier Schritten (`main.py`):
+
+1. **Artists sammeln** — Genre-Suche, balanciert im Round-Robin über die Seed-Genres,
+   Stopp bei Zielanzahl (`TOP_N_ARTISTS`).
+2. **Tracks abrufen** — pro Artist per Suche; jeder auf einem Track beteiligte
+   Künstler wird mit erfasst.
+3. **In Neo4j laden** — DB leeren, `Artist`- und `Track`-Knoten anlegen, über
+   `PERFORMED_ON` verbinden. Feature-Artists werden dabei automatisch zu Knoten.
+4. **Kollaborationen ableiten** — `COLLABORATED_WITH`-Kanten aus gemeinsamen Tracks.
+
+| Datei | Rolle |
+|---|---|
+| `main.py` | Orchestriert die vier Schritte |
+| `spotify_client.py` | Spotify-API-Zugriff, Rate-Limit-Handling, Sammellogik |
+| `neo4j_loader.py` | Schreibt Knoten/Kanten nach Neo4j |
+| `config.py` | Parameter (Artist-Anzahl, Track-Tiefe, Neo4j-Verbindung) |
+| `queries.cypher` | Kommentierte Analyse- & Demo-Queries für den Neo4j Browser |
+| `DOKUMENTATION.md` | Entwicklungsverlauf & Design-Entscheidungen |
+
 ## Voraussetzungen
 
-| Was | Details |
+- **Python 3.11+**
+- **Neo4j 5.x / 2025+** (lokal, am einfachsten über [Neo4j Desktop](https://neo4j.com/download/))
+- Ein **Spotify-Developer-Account** (kostenlos)
+
+## Installation
+
+### 1. Repository klonen
+
+```powershell
+git clone https://github.com/noahmll/spotify-KG.git
+cd spotify-KG
+```
+
+### 2. Python-Umgebung & Abhängigkeiten
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1        # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 3. Spotify-Zugang einrichten (Client ID & Secret)
+
+Die Pipeline authentifiziert sich über den **Client-Credentials-Flow** — dafür
+brauchst du eine ID und ein Secret aus einer eigenen Spotify-App:
+
+1. Auf <https://developer.spotify.com/dashboard> mit deinem Spotify-Account einloggen.
+2. **„Create app"** klicken. Beliebigen Namen/Beschreibung eingeben; als Redirect
+   URI genügt `http://localhost:8888/callback` (wird bei diesem Flow nicht genutzt,
+   ist aber Pflichtfeld). Unter „Which API/SDKs" **Web API** auswählen.
+3. Nach dem Anlegen: **Settings** öffnen → **Client ID** kopieren und über
+   **„View client secret"** das **Client Secret** anzeigen und kopieren.
+4. Beide Werte kommen in die `.env` (Schritt 5).
+
+### 4. Neo4j einrichten
+
+1. Neo4j Desktop installieren und öffnen.
+2. Eine **lokale Instanz** anlegen (**„Create instance"**), **Database user auf
+   `neo4j` belassen**, ein Passwort setzen (min. 8 Zeichen) — dieses Passwort kommt
+   in die `.env`.
+3. Instanz **starten** (Status „running"). Sie lauscht dann auf `bolt://127.0.0.1:7687`.
+
+### 5. `.env` anlegen
+
+Die Vorlage kopieren und ausfüllen:
+
+```powershell
+copy .env.example .env               # macOS/Linux: cp .env.example .env
+```
+
+```dotenv
+SPOTIFY_CLIENT_ID=deine_spotify_client_id
+SPOTIFY_CLIENT_SECRET=dein_spotify_client_secret
+NEO4J_PASSWORD=dein_neo4j_passwort
+```
+
+Die `.env` wird **nicht** eingecheckt (steht in `.gitignore`).
+
+## Ausführen
+
+Neo4j-Instanz muss laufen, dann:
+
+```powershell
+python main.py
+```
+
+Am Ende zeigt die Ausgabe die Knoten-/Kantenzahlen. Den Graphen erkundest du im
+**Neo4j Browser** unter <http://localhost:7474> — Einstieg:
+
+```cypher
+MATCH (a:Artist) RETURN a LIMIT 25;
+```
+
+Die Daten bleiben in Neo4j **dauerhaft gespeichert**; ein erneuter `python main.py`-Lauf
+ersetzt sie (die DB wird zu Beginn geleert).
+
+## Konfiguration
+
+In `config.py`:
+
+| Parameter | Bedeutung |
 |---|---|
-| Python ≥ 3.11 | mit venv (`.venv/` im Projekt) |
-| Neo4j ≥ 5.x | lokal auf `neo4j://127.0.0.1:7687`, Browser auf http://localhost:7474 (getestet mit 2026.06 Community) |
-| Spotify-App | Client-ID/Secret aus dem [Developer Dashboard](https://developer.spotify.com/dashboard) |
+| `TOP_N_ARTISTS` | Anzahl der per Suche gesammelten Seed-Artists (bestimmt Graphgröße & Kosten) |
+| `TRACK_SEARCH_PAGES` | Such-Seiten à 10 Tracks pro Artist — mehr = mehr Tracks & Kollaborationen, aber mehr API-Anfragen |
 
-**GDS/APOC werden nicht benötigt** — alle Demo-Queries laufen mit purem Cypher.
+Grobes Request-Budget: `TOP_N_ARTISTS × TRACK_SEARCH_PAGES` (Track-Phase dominiert).
+Die Seed-Genres lassen sich in `spotify_client.py` (`SEED_GENRES`) anpassen.
 
-## Setup
+## Beispiel-Queries
 
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+Vollständig kommentiert in [`queries.cypher`](queries.cypher). Auszug:
+
+```cypher
+// Top-Kollaborateure (Degree Centrality)
+MATCH (a:Artist)-[:COLLABORATED_WITH]-()
+RETURN a.name AS artist, count(*) AS kollaborationen
+ORDER BY kollaborationen DESC LIMIT 10;
+
+// Kürzester Pfad zwischen zwei Artists ("Six Degrees of Spotify")
+MATCH p = shortestPath(
+  (a:Artist {name: "Pitbull"})-[:COLLABORATED_WITH*..10]-(b:Artist {name: "Peso Pluma"})
+)
+RETURN p;
+
+// Nur das Kollaborationsnetzwerk visualisieren (ohne Track-Knoten)
+MATCH p = (:Artist)-[:COLLABORATED_WITH]-(:Artist)
+RETURN p LIMIT 300;
 ```
 
-`.env` im Projektverzeichnis anlegen (wird **nicht** committet):
+## Einschränkungen
 
-```
-SPOTIFY_CLIENT_ID=...
-SPOTIFY_CLIENT_SECRET=...
-NEO4J_PASSWORD=...
-```
+Die genutzte Spotify-App läuft im **Development-Mode** (Extended Access setzt seit
+2025 eine registrierte Organisation mit ≥250.000 MAU voraus). Empirisch heißt das:
 
-Neo4j starten (Neo4j Desktop: Instanz starten, oder `neo4j start`) und warten,
-bis http://localhost:7474 erreichbar ist.
+- Nur der **Such-Endpoint** ist nutzbar, mit **`limit ≤ 10`**.
+- **`popularity`, `followers`, `genres`** kommen als `null` zurück — es gibt daher
+  **kein Ranking-Kriterium**; die Auswahl folgt Spotifys Such-Relevanz-Reihenfolge,
+  balanciert über Genres.
+- **Batch-Abruf**, **Top-Tracks**, **Related Artists** und **Recommendations** sind
+  gesperrt (403) bzw. seit Ende 2024 abgekündigt.
 
-## Vollständiger Durchlauf
-
-```bash
-.venv/bin/python main.py
-```
-
-Keine Parameter nötig — die Stellschrauben (`TOP_N_ARTISTS`, `TRACK_SEARCH_PAGES`,
-`MAX_REQUEST_BUDGET`) liegen in [config.py](config.py).
-
-**Ablauf und erwartete Laufzeit (Default-Konfiguration, 150 Artists):**
-
-| Phase | Was passiert | Dauer |
-|---|---|---|
-| 0/4 | Budget-Check + Quota-Probe (bricht ab, **bevor** etwas gelöscht wird) | Sekunden |
-| 1/4 | Artists per Genre-Suche sammeln (round-robin über 12 Genres) | ~10 s |
-| 2/4 | Tracks pro Artist per Suche holen (**längste Phase**, Fortschrittsbalken) | ~3–4 min |
-| 3/4 | Datenbank leeren + Batch-Load nach Neo4j | Sekunden |
-| 4/4 | `COLLABORATED_WITH` in der Datenbank ableiten | Sekunden |
-
-**Gesamt: ca. 4–5 Minuten.** Einzelne `Netzwerk-Timeout — wiederhole …`- oder
-`Rate limited …`-Meldungen sind **kein Fehler**: Der betroffene Request wird
-automatisch wiederholt, der Lauf läuft weiter. Abgebrochen wird nur bei
-erschöpfter Tages-Quota (klare `=== ABBRUCH`-Meldung) — in dem Fall bleibt die
-Datenbank unverändert.
-
-### Woran erkenne ich einen erfolgreichen Lauf?
-
-1. Konsole/`run.log` endet mit `=== Lauf ERFOLGREICH abgeschlossen ===` plus Statistik.
-2. `last_run_stats.json` existiert und enthält Zeitstempel + Knoten-/Kantenzahlen
-   (wird **nur** nach vollständigem Lauf geschrieben).
-3. Gegenprobe in Neo4j (http://localhost:7474):
-   ```cypher
-   MATCH (n) RETURN labels(n)[0] AS typ, count(*) AS anzahl;
-   ```
-
-### Schutzmechanismen
-
-- **Kein Doppelstart:** Eine Lock-Datei (`.run.lock`) verhindert parallele Läufe
-  (ein zweiter Lauf würde die Datenbank mitten im ersten leeren).
-- **Request-Timeout (15 s)** + automatischer Retry bei Netzwerkfehlern.
-- **Quota-Schutz:** Budget-Schätzung + 1-Request-Probe vor dem Start; die
-  Datenbank wird erst geleert, wenn alle Daten vollständig geholt sind.
-
-## Demo & Analyse
-
-- **[docs/demo_queries.cypher](docs/demo_queries.cypher)** — kommentierte
-  Cypher-Queries für die Präsentation (Überblick, Top-Kollaborateure,
-  Teilgraphen, Pfade).
-- **[docs/presentation_plan.md](docs/presentation_plan.md)** — Ablaufplan für
-  die Live-Demo.
-- [queries.cypher](queries.cypher) — ältere/vollständige Query-Sammlung.
-
-> **Visualisierungs-Limit:** Der Neo4j Browser rendert standardmäßig nicht
-> beliebig viele Elemente (Einstellung „Visualization node limit", Default 1000).
-> Das ist ein reines Anzeige-Limit des Browsers — die Datenbank enthält immer
-> alle Daten. Für die Demo sind gezielte Teilgraph-Queries (siehe
-> `docs/demo_queries.cypher`) ohnehin aussagekräftiger als ein Voll-Rendering.
-
-## Tests
-
-```bash
-.venv/bin/python -m unittest discover tests
-```
-
-Testet die netzwerkfreie Logik: Request-Schätzung, Artist-Mapping,
-Retry-/Timeout-Verhalten, Lock-Mechanismus.
+Der Wert des Projekts liegt entsprechend in der **Kollaborations-Topologie**, die
+vollständig erhalten bleibt. Details zum Entwicklungsweg: [`DOKUMENTATION.md`](DOKUMENTATION.md).
 
 ## Projektstruktur
 
 ```
-main.py               Pipeline-Orchestrierung (Einstiegspunkt)
-spotify_client.py     Spotify-API-Zugriff, Retry-/Quota-Logik
-neo4j_loader.py       Neo4j-Persistenz (Constraints, Batch-Load, Ableitung)
-config.py             Alle Stellschrauben
-queries.cypher        Analyse-Queries (Sammlung)
-docs/                 Demo-Queries, Präsentationsplan, Anforderungs-Check
-tests/                Unit-Tests (ohne Netzwerk/DB lauffähig)
-DOKUMENTATION.md      Entwicklungsgeschichte & API-Einschränkungen
+spotify-KG/
+├── main.py             # Pipeline-Orchestrierung
+├── spotify_client.py   # Spotify-API-Zugriff & Sammellogik
+├── neo4j_loader.py     # Neo4j-Schreiblogik
+├── config.py           # Parameter
+├── queries.cypher      # Analyse- & Demo-Queries
+├── requirements.txt    # Python-Abhängigkeiten
+├── .env.example        # Vorlage für Zugangsdaten
+├── DOKUMENTATION.md    # Entwicklungsverlauf & Design
+└── README.md
 ```
+
+## Lizenz
+
+[MIT](LICENSE) — freie Nutzung, Veränderung und Weiterentwicklung.
+
+## Autoren
+
+**DIS18 – Gruppe 6:** Johnson Gaspar Baptista · Noah Anton Müller
